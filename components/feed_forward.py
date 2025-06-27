@@ -1,3 +1,6 @@
+import math
+
+import torch
 from torch import nn
 import torch.nn.functional as F
 from .model_config import RainLLMConfig
@@ -26,10 +29,43 @@ class FeedForward(FFN):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 class MemoryLayer(FFN):
+    """
+    meta
+    """
     pass
 
 class MOEFeedForward(FFN):
-    pass
+    class MOEGate(nn.Module):
+        def __init__(self, config: RainLLMConfig):
+            super().__init__()
+            self.config = config
+            self.per_token_num_experts = config.per_token_num_experts
+            self.n_experts = config.n_experts
+            self.score_func = config.score_func
+            self.aux_loss_alpha = config.aux_loss_alpha
+            self.seq_aux = config.seq_aux
+            self.norm_topk_prob = config.norm_topk_prob
+            self.gate_dim = config.dim
+            self.weight = nn.Parameter(torch.empty((self.n_experts, self.gate_dim)))
+            self.reset_parameters()
+
+        def reset_parameters(self):
+            torch.nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+        def forward(self, hidden_states):
+            pass
+    def __init__(self, config: RainLLMConfig):
+        super().__init__(config)
+        self.experts = nn.ModuleList([
+            FeedForward(config)
+            for _ in range(config.n_experts)
+        ])
+        self.share_experts = None
+        if self.config.n_share_experts > 0:
+            self.share_experts = nn.ModuleList([
+                FeedForward(config)
+                for _ in range(self.config.n_share_experts)
+            ])
 
 
 class FeedForwardFactory:

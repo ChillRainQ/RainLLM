@@ -28,15 +28,6 @@ def rotate(dim: int, base: float, seq_len: int = 32 * 1024):
     # 复数形式
     pos_cis = torch.polar(torch.ones_like(m_theta), m_theta)
     return pos_cis
-# def rotate(dim: int, end: int = int(32 * 1024), theta: float = 1e6):
-#     """
-#     位置编码预计算
-#     """
-#     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-#     t = torch.arange(end, device=freqs.device)  # type: ignore
-#     freqs = torch.outer(t, freqs).float()  # type: ignore
-#     pos_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-#     return pos_cis
 
 
 class TransformerBlock(nn.Module):
@@ -54,9 +45,10 @@ class TransformerBlock(nn.Module):
         self.attention_norm = NormFactory.norm(config, config.norm_type)
         self.ffn = FeedForwardFactory.ffn(config, config.ffn_type)
         self.ffn_norm = NormFactory.norm(config, config.norm_type)
+        self.alpha = nn.Parameter(torch.tensor(1.0))
+        self.beta = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, vector, pos_cis, kv_cache=None, use_cache=False):
-        # vector_attn_norm = self.attention_norm(vector)
         vector_attn, past_kv = self.attention(
             self.attention_norm(vector),
             pos_cis,
@@ -64,8 +56,8 @@ class TransformerBlock(nn.Module):
             use_cache=use_cache
         )
         # 残差链接
-        res_add = vector_attn + vector
-        out = res_add + self.ffn(self.ffn_norm(res_add))
+        res_add = vector + self.alpha * vector_attn
+        out = res_add + self.beta * self.ffn(self.ffn_norm(res_add))
         return out, past_kv
 
 
@@ -182,17 +174,6 @@ class RainLLM(PreTrainedModel):
             logits, past_kvs = out.logits[:, -1, :], out.past_key_values
             logits[:, list(set(input_ids.tolist()[0]))] /= rp
             logits /= (temperature + 1e-9)
-            # top_p采样
-            # if top_p is not None and top_p < 1.0:
-            #     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            #     sorted_probs = F.softmax(sorted_logits, dim=-1)
-            #     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            #     # 拿到满足top_p的索引
-            #     sorted_indices_to_remove = cumulative_probs > top_p
-            #     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-            #     sorted_indices_to_remove[:, 0] = False
-            #     indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-            #     logits[indices_to_remove] = -float('Inf')
             if top_p is not None and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
                 sorted_probs = F.softmax(sorted_logits, dim=-1)

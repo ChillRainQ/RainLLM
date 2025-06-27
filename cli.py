@@ -16,13 +16,15 @@ def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained('./models/tokenizer')
     if args.load == 0:
         moe_path = '_moe' if args.use_moe else ''
+        modes = {0: 'pretrain', 1: 'full_sft_out_learn', 2: 'rlhf', 3: 'reason'}
         modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason'}
-        ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
+        ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}_out_learn{moe_path}_1.pth'
 
         model = RainLLM(RainLLMConfig(
             dim=args.dim,
             n_layers=args.n_layers,
-            max_seq_len=args.max_seq_len
+            max_seq_len=1024
+            # max_seq_len=args.max_seq_len
         ))
 
         state_dict = torch.load(ckp, map_location=args.device)
@@ -122,7 +124,7 @@ def main():
     parser.add_argument('--history_cnt', default=0, type=int)
     parser.add_argument('--stream', default=True, type=bool)
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=0, type=int,
+    parser.add_argument('--model_mode', default=1, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型")
     args = parser.parse_args()
 
