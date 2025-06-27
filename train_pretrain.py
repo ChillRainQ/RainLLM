@@ -93,7 +93,7 @@ def train_epoch(epoch, wandb):
 
             torch.save(state_dict, ckp)
             with open('config', 'w') as f:
-                json.dump()
+                json.dump(model.n_layers, f)
             model.train()
 
 
