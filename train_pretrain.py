@@ -85,13 +85,15 @@ def train_epoch(epoch, wandb):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/pretrain_{lm_config.dim}{moe_path}.pth'
-
+            config = f'{args.save_dir}/pretrain_{lm_config.dim}{moe_path}/config.json'
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 state_dict = model.module.state_dict()
             else:
                 state_dict = model.state_dict()
 
             torch.save(state_dict, ckp)
+            with open('config', 'w') as f:
+                json.dump()
             model.train()
 
 

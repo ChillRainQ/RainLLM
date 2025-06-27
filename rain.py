@@ -14,9 +14,31 @@ class RainClient:
     tokenizer: AutoTokenizer
     config: RainLLMConfig
     deivce: str
-    def __init__(self, model_path, tokenizer_path, **args):
+
+    def __init__(self, model_path, tokenizer_path, model_config_path, **args):
+        """
+        RainLLM模型初始化方法
+        
+        参数:
+            model_path (str): 模型文件路径，可以是本地文件或预训练模型名称
+            tokenizer_path (str): tokenizer文件路径
+            model_config_path (str): 模型配置文件路径
+            **args: 其他配置参数，包括:
+                dim (int): 模型维度，默认256
+                n_layers (int): 模型层数，默认16
+                max_seq_len (int): 最大序列长度，默认8192
+                stream (bool): 是否使用流式处理，默认True
+        
+        功能:
+            1. 初始化tokenizer和设备
+            2. 加载模型配置
+            3. 根据路径类型(本地文件/预训练模型)加载模型
+            4. 将模型移动到指定设备
+            5. 打印模型参数量
+        """
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model_config_path = model_config_path
         self.config = RainLLMConfig(
                 dim=args.get('dim', 256),
                 n_layers=args.get('n_layers', 16),
@@ -25,6 +47,8 @@ class RainClient:
         )
         if os.path.isfile(model_path):
             self.model = RainLLM(self.config)
+            self.model.load_config(self.model_config_path)
+            self.model.init_model()
             state_dict = torch.load(model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
             self.model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
         else:

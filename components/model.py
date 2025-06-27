@@ -65,6 +65,7 @@ class RainLLM(PreTrainedModel):
     def __init__(self, llm_config: RainLLMConfig = RainLLMConfig()):
         super().__init__(llm_config)
         self.config = llm_config
+        self.n_layers = self.config.n_layers
         # 词嵌入层
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
         # 位置编码预计算
@@ -87,6 +88,22 @@ class RainLLM(PreTrainedModel):
         # 输出结构
         self.OUT = CausalLMOutputWithPast()
         print(json.dumps(self.config.__dict__, indent=4))
+
+    def load_config(self, config: str):
+        with open(config, 'r') as f:
+            loaded_config = json.load(f);
+            self.n_layers = loaded_config.get('n_layers', self.n_layers)
+    
+    def init_model(self):
+        # 初始化transformer块层数
+        if self.n_layers != self.config.n_layers:
+            self.add_transformerBlock(count=self.n_layers - self.config.n_layers)
+    def add_transformerBlock(self, count: int):
+        for _ in range(count):
+            self.transformer_blocks.append(
+                TransformerBlock(len(self.transformer_blocks) + 1, self.config)
+            )
+
 
     def forward(self,
                 input_token_ids: torch.Tensor = None,
