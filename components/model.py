@@ -1,13 +1,14 @@
 import json
-from typing import List, Tuple, Generator
+from threading import Thread
 
 import torch
 import torch.nn.functional as F
+from typing import List, Tuple, Generator
 from torch import nn
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from .attention import AttentionFactory
-from .feed_forward import FeedForwardFactory, MOEFeedForward
+from .feed_forward import FeedForwardFactory
 from .model_config import RainLLMConfig
 from .norm import NormFactory
 
@@ -60,12 +61,46 @@ class TransformerBlock(nn.Module):
         out = res_add + self.beta * self.ffn(self.ffn_norm(res_add))
         return out, past_kv
 
+    def freeze(self, freeze_attention=False, freeze_ffn=False):
+        """
+        TransformerBlock冻结
+        :return:
+        """
+        if freeze_attention:
+            for param in self.attention.parameters():
+                param.requires_grad = False
+            for param in self.attention_norm.parameters():
+                param.requires_grad = False
+        if freeze_ffn:
+            for param in self.ffn.parameters():
+                param.requires_grad = False
+            for param in self.ffn_norm.parameters():
+                param.requires_grad = False
+
+        self.alpha.requires_grad = False
+        self.beta.requires_grad = False
+
+    def unfreeze(self):
+        for param in self.attention.parameters():
+            param.requires_grad = True
+        for param in self.attention_norm.parameters():
+            param.requires_grad = True
+        for param in self.ffn.parameters():
+            param.requires_grad = True
+        for param in self.ffn_norm.parameters():
+            param.requires_grad = True
+        self.alpha.requires_grad = True
+        self.beta.requires_grad = True
+
 
 class RainLLM(PreTrainedModel):
-    def __init__(self, llm_config: RainLLMConfig = RainLLMConfig()):
+    def __init__(self, learn: bool = False, llm_config: RainLLMConfig = RainLLMConfig()):
         super().__init__(llm_config)
+        self.flag = 0
+        self.learn = learn
         self.config = llm_config
-        self.n_layers = self.config.n_layers
+        self.runtime_data = dict()
+        # self.n_layers = self.config.n_layers
         # 词嵌入层
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
         # 位置编码预计算
@@ -77,6 +112,7 @@ class RainLLM(PreTrainedModel):
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(i, self.config) for i in range(self.config.n_layers)]
         )
+        self.learn_transformer_blocks = nn.ModuleList()
         # 层归一化
         self.norm = NormFactory.norm(self.config, self.config.norm_type)
         # drop
@@ -89,21 +125,72 @@ class RainLLM(PreTrainedModel):
         self.OUT = CausalLMOutputWithPast()
         print(json.dumps(self.config.__dict__, indent=4))
 
-    def load_config(self, config: str):
-        with open(config, 'r') as f:
-            loaded_config = json.load(f);
-            self.n_layers = loaded_config.get('n_layers', self.n_layers)
-    
+    def freeze_layers(self, block: str, start_layers: int = 0, end_layers: int = 0, freeze_attention: bool = False,
+                      freeze_ffn: bool = False):
+        """
+        冻结Transformer块
+        """
+        if block == "eval":
+            for i in range(start_layers, end_layers):
+                self.transformer_blocks[i].freeze(freeze_attention=freeze_attention, freeze_ffn=freeze_ffn)
+        elif block == "learn":
+            for i in range(start_layers, end_layers):
+                self.learn_transformer_blocks[i].freeze(freeze_attention=freeze_attention, freeze_ffn=freeze_ffn)
+
+    def unfreeze(self, block):
+        """
+        解冻Transformer块
+        """
+        if block == "eval":
+            for i in range(len(self.transformer_blocks)):
+                self.transformer_blocks[i].unfreeze()
+        elif block == "learn":
+            for i in range(len(self.learn_transformer_blocks)):
+                self.learn_transformer_blocks[i].unfreeze()
+
+    def load_runtime_data(self, runtime_data_path: str):
+        with open(runtime_data_path, 'r') as f:
+            self.runtime_data = json.load(f)
+        self._runtime_data_check()
+
+    def _runtime_data_check(self):
+        if "n_layers" not in self.runtime_data:
+            self.runtime_data["n_layers"] = self.config.n_layers
+
+    # def load_runtime_data(self, path):
+    #     pass
+
     def init_model(self):
         # 初始化transformer块层数
-        if self.n_layers != self.config.n_layers:
-            self.add_transformerBlock(count=self.n_layers - self.config.n_layers)
+        self.add_transformerBlock(count=self.runtime_data["n_layers"] - self.config.n_layers)
+
+    def set_train(self):
+        self.train()
+        self.flag = 1
+
+    def set_eval(self):
+        self.eval()
+        self.flag = 0
+        self.learn_transformer_blocks = nn.ModuleList(
+            [TransformerBlock(i, self.config) for i in range(len(self.transformer_blocks))]
+        )
+        self.learn_transformer_blocks.load_state_dict(self.transformer_blocks.state_dict())
+
+    def sync_back(self):
+        """
+        同步 transformer_block
+        :return:
+        """
+        self.transformer_blocks.load_state_dict(self.learn_transformer_blocks.state_dict())
+
+    def load_model_state(self, state_dict):
+        self.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
+
     def add_transformerBlock(self, count: int):
         for _ in range(count):
             self.transformer_blocks.append(
                 TransformerBlock(len(self.transformer_blocks) + 1, self.config)
             )
-
 
     def forward(self,
                 input_token_ids: torch.Tensor = None,
@@ -133,6 +220,10 @@ class RainLLM(PreTrainedModel):
         self.OUT.__setitem__("aux_loss", 0)
         self.OUT.__setitem__("past_key_values", past_kvs)
         return self.OUT
+
+    def online_train(self, ):
+        pass
+
 
     @torch.inference_mode()
     def generate(self,
@@ -170,6 +261,7 @@ class RainLLM(PreTrainedModel):
             for seq in generated
         ]
         return torch.cat(generated, dim=0)
+
     def _stream(self,
                 input_ids: torch.Tensor,
                 eos_token_id: int,
