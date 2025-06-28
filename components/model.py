@@ -48,17 +48,50 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = NormFactory.norm(config, config.norm_type)
         self.alpha = nn.Parameter(torch.tensor(1.0))
         self.beta = nn.Parameter(torch.tensor(1.0))
+        self._init_weights(module=self)
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, vector, pos_cis, kv_cache=None, use_cache=False):
+        # vector_attn, past_kv = self.attention(
+        #     self.attention_norm(vector),
+        #     pos_cis,
+        #     kv_cache=kv_cache,
+        #     use_cache=use_cache
+        # )
+        # # 残差链接
+        # res_add = vector + self.alpha * vector_attn
+        # out = res_add + self.beta * self.ffn(self.ffn_norm(res_add))
+        # return out, past_kv
+
+        normed = self.attention_norm(vector)
+        normed = normed * (1.0 + torch.randn_like(normed) * 0.001)  # 添加微小噪声增强稳定性
+        
         vector_attn, past_kv = self.attention(
-            self.attention_norm(vector),
+            normed,
             pos_cis,
             kv_cache=kv_cache,
             use_cache=use_cache
         )
-        # 残差链接
-        res_add = vector + self.alpha * vector_attn
-        out = res_add + self.beta * self.ffn(self.ffn_norm(res_add))
+        # 修改8：残差连接添加稳定化处理
+        res_add = vector + F.layer_norm(
+            self.alpha * vector_attn, 
+            [self.dim],
+            weight=torch.ones(self.dim, device=vector.device),
+            bias=torch.zeros(self.dim, device=vector.device)
+        )
+        # 修改9：FFN部分添加稳定化
+        ffn_input = self.ffn_norm(res_add)
+        ffn_out = self.ffn(ffn_input)
+        out = res_add + F.layer_norm(
+            self.beta * ffn_out,
+            [self.dim],
+            weight=torch.ones(self.dim, device=vector.device),
+            bias=torch.zeros(self.dim, device=vector.device)
+        )
         return out, past_kv
 
     def freeze(self, freeze_attention=False, freeze_ffn=False):
@@ -103,6 +136,7 @@ class RainLLM(PreTrainedModel):
         # self.n_layers = self.config.n_layers
         # 词嵌入层
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
+        nn.init.normal_(self.embeddings.weight, mean=0.0, std=0.02) 
         # 位置编码预计算
         self.register_buffer("pos_cis",
                              rotate(dim=self.config.dim // self.config.n_heads,
@@ -119,6 +153,7 @@ class RainLLM(PreTrainedModel):
         self.dropout = nn.Dropout(self.config.dropout)
         # 输出
         self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
+        nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
         # 权重共享
         self.embeddings.weight = self.output.weight
         # 输出结构

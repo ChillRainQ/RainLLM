@@ -21,7 +21,7 @@ from components.model_config import RainLLMConfig
 from components.dataset import PretrainDataset
 
 warnings.filterwarnings('ignore')
-
+losses = []
 
 def Logger(content):
     if not ddp or dist.get_rank() == 0:
@@ -67,6 +67,7 @@ def train_epoch(epoch, wandb):
 
         if step % args.log_interval == 0:
             spend_time = time.time() - start_time
+            losses.append(loss.item() * args.accumulation_steps)
             Logger(
                 'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
                     epoch + 1,
@@ -93,14 +94,17 @@ def train_epoch(epoch, wandb):
                 state_dict = model.state_dict()
 
             torch.save(state_dict, ckp)
-            with open('config', 'w') as f:
-                json.dump(model.n_layers, f)
+            # with open('config', 'w') as f:
+            #     json.dump(model.n_layers, f)
             model.train()
+
+        with open('losses.json', 'w') as f:
+            json.dump(losses, f)
 
 
 def init_model(lm_config):
     tokenizer = AutoTokenizer.from_pretrained('./models/tokenizer')
-    model = RainLLM(lm_config).to(args.device)
+    model = RainLLM(llm_config=lm_config).to(args.device)
     Logger(f'LLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
     return model, tokenizer
 
@@ -122,9 +126,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind Pretraining")
     parser.add_argument("--out_dir", type=str, default="out")
     # 若要以最快速度实现zero则epochs设置为1轮；否则应当利用有限的数据训练2~6个epochs。
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--use_wandb", action="store_true")
@@ -137,7 +141,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=100)
     parser.add_argument('--local_rank', type=int, default=-1)
-    parser.add_argument('--dim', default=256, type=int)
+    parser.add_argument('--dim', default=512, type=int)
     parser.add_argument('--n_layers', default=16, type=int)
     parser.add_argument('--max_seq_len', default=512, type=int)
     parser.add_argument('--use_moe', default=False, type=bool)
