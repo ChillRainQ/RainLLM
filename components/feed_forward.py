@@ -1,6 +1,7 @@
 from torch import nn
 import torch.nn.functional as F
 from .model_config import RainLLMConfig
+from transformers.activations import ACT2FN
 
 
 class FFN(nn.Module):
@@ -21,9 +22,10 @@ class FeedForward(FFN):
         self.w2 = nn.Linear(config.hidden_dim, config.dim, bias=False)
         self.w3 = nn.Linear(config.dim, config.hidden_dim, bias=False)
         self.dropout = nn.Dropout(config.dropout)
+        self.act_fn = ACT2FN[self.config.ffn_act]
 
     def forward(self, x):
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.w2(self.act_fn(self.w1(x)) * self.w3(x)))
 
 class MemoryLayer(FFN):
     pass

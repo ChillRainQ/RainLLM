@@ -4,7 +4,7 @@ from typing import List, Tuple, Generator
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from .attention import AttentionFactory
 from .feed_forward import FeedForwardFactory, MOEFeedForward
@@ -12,31 +12,16 @@ from .model_config import RainLLMConfig
 from .norm import NormFactory
 
 
-def rotate(dim: int, base: float, seq_len: int = 32 * 1024):
+def rotate(dim: int, base: float, len: int = 32 * 1024):
     """
     旋转位置编码
     """
-    if dim % 2 != 0:
-        raise ValueError(f"dim must be even, but got {dim}")
-    d = dim // 2
-    i = torch.arange(1, d + 1, dtype=torch.float32)
-    # 旋转角序列
-    theta = base ** (-2 * (i - 1) / dim)
-    # 索引位置
-    m = torch.arange(seq_len, device=theta.device)
-    m_theta = torch.outer(m, theta).float()
-    # 复数形式
-    pos_cis = torch.polar(torch.ones_like(m_theta), m_theta)
-    return pos_cis
-# def rotate(dim: int, end: int = int(32 * 1024), theta: float = 1e6):
-#     """
-#     位置编码预计算
-#     """
-#     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-#     t = torch.arange(end, device=freqs.device)  # type: ignore
-#     freqs = torch.outer(t, freqs).float()  # type: ignore
-#     pos_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-#     return pos_cis
+    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(len, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1)
+    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1)
+    return freqs_cos, freqs_sin
 
 
 class TransformerBlock(nn.Module):
@@ -50,79 +35,109 @@ class TransformerBlock(nn.Module):
         self.n_heads = config.n_heads
         self.dim = config.dim
         self.head_dim = config.dim // self.n_heads
+        self.input_norm = NormFactory.norm(config, config.norm_type)
         self.attention = AttentionFactory.attention(config, config.attention_type)
         self.attention_norm = NormFactory.norm(config, config.norm_type)
         self.ffn = FeedForwardFactory.ffn(config, config.ffn_type)
-        self.ffn_norm = NormFactory.norm(config, config.norm_type)
+        # self.ffn_norm = NormFactory.norm(config, config.norm_type)
 
-    def forward(self, vector, pos_cis, kv_cache=None, use_cache=False):
+    def forward(self, hidden_states, pos_cis, kv_cache=None, use_cache=False, attention_mask=None):
         # vector_attn_norm = self.attention_norm(vector)
-        vector_attn, past_kv = self.attention(
-            self.attention_norm(vector),
+        input = hidden_states
+        hidden_states, past_kv = self.attention(
+            self.input_norm(hidden_states),
             pos_cis,
             kv_cache=kv_cache,
-            use_cache=use_cache
+            use_cache=use_cache,
+            attention_mask=attention_mask
         )
         # 残差链接
-        res_add = vector_attn + vector
-        out = res_add + self.ffn(self.ffn_norm(res_add))
+        res_add = hidden_states + input
+        out = res_add + self.ffn(self.attention_norm(res_add))
         return out, past_kv
 
 
-class RainLLM(PreTrainedModel):
+class RainModule(nn.Module):
     def __init__(self, llm_config: RainLLMConfig = RainLLMConfig()):
-        super().__init__(llm_config)
+        super().__init__()
         self.config = llm_config
         # 词嵌入层
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
-        # 位置编码预计算
-        self.register_buffer("pos_cis",
-                             rotate(dim=self.config.dim // self.config.n_heads,
-                                    base=self.config.rope_base),
-                             persistent=False)
+        # drop
+        self.dropout = nn.Dropout(self.config.dropout)
         # Transformer块
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(i, self.config) for i in range(self.config.n_layers)]
         )
         # 层归一化
         self.norm = NormFactory.norm(self.config, self.config.norm_type)
-        # drop
-        self.dropout = nn.Dropout(self.config.dropout)
-        # 输出
-        self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
-        # 权重共享
-        self.embeddings.weight = self.output.weight
-        # 输出结构
-        self.OUT = CausalLMOutputWithPast()
-        print(json.dumps(self.config.__dict__, indent=4))
+        # 位置编码预计算
+        cos, sin = rotate(dim=self.config.dim // self.config.n_heads,
+                          base=self.config.rope_base,
+                          len=self.config.max_position_embs)
+        self.register_buffer("freqs_cos", cos, persistent=False)
+        self.register_buffer("freqs_sin", sin, persistent=False)
+
 
     def forward(self,
                 input_token_ids: torch.Tensor = None,
+                attention_mask: torch.Tensor | None = None,
                 kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
                 use_cache: bool = False,
                 **args):
         # 检查 kv_cache 并初始化
         kv_cache = kv_cache or [None] * len(self.transformer_blocks)
-        start_pos = args.get('start_pos', 0)
+        start_pos = kv_cache[0][0].shape[1] if kv_cache[0] is not None else 0
         # 词嵌入
+        _, seq_len = input_token_ids.shape
         vector = self.dropout(self.embeddings(input_token_ids))
-        # 旋转位置编码预计算
-        pos_cis = self.pos_cis[start_pos: start_pos + input_token_ids.size(1)]
+        # 旋转位置编码计算
+        position_embeddings = (
+            self.freqs_cos[start_pos:start_pos + seq_len],
+            self.freqs_sin[start_pos:start_pos + seq_len]
+        )
         # 传播每一个Transformer块
         past_kvs = []
-        for i, layer in enumerate(self.transformer_blocks):
+        for layer_ids, (layer, past_kv) in enumerate(zip(self.transformer_blocks, past_kvs)):
             vector, past_kv = layer(
                 vector,
-                pos_cis,
-                kv_cache=kv_cache[i],
-                use_cache=use_cache)
+                position_embeddings,
+                kv_cache=kv_cache,
+                use_cache=use_cache,
+                attention_mask=attention_mask)
             past_kvs.append(past_kv)
-        # 概率
-        logits = self.output(self.norm(vector))
-        # aux_loss = sum(l.ffn.aux_loss for l in self.transformer_blocks if isinstance(l.feed_forward, MOEFeedForward))
-        self.OUT.__setitem__("logits", logits)
-        self.OUT.__setitem__("aux_loss", 0)
-        self.OUT.__setitem__("past_key_values", past_kvs)
+        vector = self.norm(vector)
+        return vector, past_kvs
+
+
+class RainForCausalLM(PreTrainedModel, GenerationMixin):
+    def __init__(self, config: RainLLMConfig):
+        self.config = config or RainLLMConfig()
+        super().__init__(self.config)
+        self.model = RainModule(self.config)
+        self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
+        self.OUT = CausalLMOutputWithPast()
+
+    def forward(self,
+                input_ids: torch.Tensor | None = None,
+                attention_mask: torch.Tensor | None = None,
+                past_kvs: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+                use_cache: bool = False,
+                logits_keep: int | torch.Tensor = 0,
+                **args):
+        hidden_states, past_kvs = self.model(
+            input_token_ids=input_ids,
+            attention_mask=attention_mask,
+            kv_cache=past_kvs,
+            use_cache=use_cache,
+            **args
+        )
+        slice_indices = slice(-logits_keep, None) if isinstance(logits_keep, int) else logits_keep
+        logits = self.output(hidden_states[:, slice_indices, :])
+        self.OUT.__setitem__('last_hidden_state', hidden_states)
+        self.OUT.__setitem__('logits', logits)
+        self.OUT.__setitem__('aux_loss', 0)
+        self.OUT.__setitem__('past_key_values', past_kvs)
         return self.OUT
 
     @torch.inference_mode()
@@ -161,6 +176,7 @@ class RainLLM(PreTrainedModel):
             for seq in generated
         ]
         return torch.cat(generated, dim=0)
+
     def _stream(self,
                 input_ids: torch.Tensor,
                 eos_token_id: int,
@@ -182,17 +198,6 @@ class RainLLM(PreTrainedModel):
             logits, past_kvs = out.logits[:, -1, :], out.past_key_values
             logits[:, list(set(input_ids.tolist()[0]))] /= rp
             logits /= (temperature + 1e-9)
-            # top_p采样
-            # if top_p is not None and top_p < 1.0:
-            #     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            #     sorted_probs = F.softmax(sorted_logits, dim=-1)
-            #     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            #     # 拿到满足top_p的索引
-            #     sorted_indices_to_remove = cumulative_probs > top_p
-            #     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-            #     sorted_indices_to_remove[:, 0] = False
-            #     indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-            #     logits[indices_to_remove] = -float('Inf')
             if top_p is not None and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
                 sorted_probs = F.softmax(sorted_logits, dim=-1)
