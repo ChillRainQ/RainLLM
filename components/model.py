@@ -31,15 +31,15 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, id: int, config: RainLLMConfig):
         super().__init__()
-        self.id = id
         self.n_heads = config.n_heads
         self.dim = config.dim
         self.head_dim = config.dim // self.n_heads
-        self.input_norm = NormFactory.norm(config, config.norm_type)
         self.attention = AttentionFactory.attention(config, config.attention_type)
+
+        self.layer_id = id
+        self.input_norm = NormFactory.norm(config, config.norm_type)
         self.attention_norm = NormFactory.norm(config, config.norm_type)
         self.ffn = FeedForwardFactory.ffn(config, config.ffn_type)
-        # self.ffn_norm = NormFactory.norm(config, config.norm_type)
 
     def forward(self, hidden_states, pos_cis, kv_cache=None, use_cache=False, attention_mask=None):
         # vector_attn_norm = self.attention_norm(vector)
@@ -61,17 +61,12 @@ class RainModule(nn.Module):
     def __init__(self, llm_config: RainLLMConfig = RainLLMConfig()):
         super().__init__()
         self.config = llm_config
-        # 词嵌入层
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
-        # drop
         self.dropout = nn.Dropout(self.config.dropout)
-        # Transformer块
         self.transformer_blocks = nn.ModuleList(
             [TransformerBlock(i, self.config) for i in range(self.config.n_layers)]
         )
-        # 层归一化
         self.norm = NormFactory.norm(self.config, self.config.norm_type)
-        # 位置编码预计算
         cos, sin = rotate(dim=self.config.dim // self.config.n_heads,
                           base=self.config.rope_base,
                           len=self.config.max_position_embs)
@@ -86,28 +81,28 @@ class RainModule(nn.Module):
                 use_cache: bool = False,
                 **args):
         # 检查 kv_cache 并初始化
+        _, seq_len = input_token_ids.shape
         kv_cache = kv_cache or [None] * len(self.transformer_blocks)
         start_pos = kv_cache[0][0].shape[1] if kv_cache[0] is not None else 0
         # 词嵌入
-        _, seq_len = input_token_ids.shape
-        vector = self.dropout(self.embeddings(input_token_ids))
+        hidden_states = self.dropout(self.embeddings(input_token_ids))
         # 旋转位置编码计算
         position_embeddings = (
             self.freqs_cos[start_pos:start_pos + seq_len],
             self.freqs_sin[start_pos:start_pos + seq_len]
         )
         # 传播每一个Transformer块
-        past_kvs = []
-        for layer_ids, (layer, past_kv) in enumerate(zip(self.transformer_blocks, past_kvs)):
-            vector, past_kv = layer(
-                vector,
+        presents = []
+        for layer_ids, (layer, past_key_value) in enumerate(zip(self.transformer_blocks, kv_cache)):
+            hidden_states, present = layer(
+                hidden_states,
                 position_embeddings,
-                kv_cache=kv_cache,
+                kv_cache=past_key_value,
                 use_cache=use_cache,
                 attention_mask=attention_mask)
-            past_kvs.append(past_kv)
-        vector = self.norm(vector)
-        return vector, past_kvs
+            presents.append(present)
+        hidden_states = self.norm(hidden_states)
+        return hidden_states, presents
 
 
 class RainForCausalLM(PreTrainedModel, GenerationMixin):
@@ -116,6 +111,7 @@ class RainForCausalLM(PreTrainedModel, GenerationMixin):
         super().__init__(self.config)
         self.model = RainModule(self.config)
         self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
+        self.model.embeddings.weight = self.output.weight
         self.OUT = CausalLMOutputWithPast()
 
     def forward(self,

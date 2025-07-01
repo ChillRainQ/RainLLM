@@ -117,28 +117,32 @@ class FlashAttention(Attention):
     def forward(self,
                 x: torch.Tensor,
                 pos_cis: Tuple[torch.Tensor, torch.Tensor],
-                kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+                kv_cache: Tuple[torch.Tensor, torch.Tensor] | None = None,
                 use_cache=False,
                 attention_mask: torch.Tensor | None = None):
         batch_size, seq_len, dim = x.shape
         q = self.wq(x).view(batch_size, seq_len, self.n_attention_heads, self.head_dim)
         k = self.wk(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         v = self.wv(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+
         cos, sin = pos_cis
         q, k = Attention.apply_rotary_emb(q, k, cos[:seq_len], sin[:seq_len])
-        if kv_cache:
+
+        if kv_cache is not None:
             k = torch.cat([kv_cache[0], k], dim=1)
             v = torch.cat([kv_cache[1], v], dim=1)
         past_kv = (k, v) if use_cache else None
+
         q, k, v = (
             q.transpose(1, 2),
             repeat_kv(k, self.n_rep).transpose(1, 2),
             repeat_kv(v, self.n_rep).transpose(1, 2)
         )
+
         if seq_len != 1:
             dropout_p = self.dropout if self.training else 0.0
             attn_mask = None
-            if attention_mask != None:
+            if attention_mask is not None:
                 attn_mask = attention_mask.view(batch_size, 1, 1, -1).expand(batch_size, self.n_attention_heads, seq_len, -1)
                 attn_mask = attn_mask.bool() if attention_mask is not None else None
             output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)

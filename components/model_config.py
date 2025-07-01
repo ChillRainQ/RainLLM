@@ -24,7 +24,7 @@ class RainLLMConfig(PretrainedConfig):
 
     def __init__(self, dim: int = 256, max_seq_len: int = 8192, n_layers: int = 16, vocab_size: int = 6400,
                  n_heads: int = 8, n_kv_heads: int = 2, attention_type: str = "flash", norm_type: str = "rms",
-                 ffn_type: str = "default", norm_eps: float = 1e-5, dropout: float = 0.0, rope_base: float = 1e6,
+                 ffn_type: str = "default", norm_eps: float = 1e-05, dropout: float = 0.0, rope_base: float = 1e6,
                  hidden_dim: int = None, multiple_of: int = 64, use_moe: bool = False, ffn_act: str = 'silu',
                  max_position_embs: int = 32768, **kwargs):
         super().__init__(**kwargs)
