@@ -70,6 +70,8 @@ class Trainer(ABC):
 
     def save(self):
         moe_path = '_moe' if self.llm_config.use_moe else ''
+        if not os.path.isdir(self.arg.out_dir):
+            os.mkdir(self.arg.out_dir)
         ckp = f'{self.arg.out_dir}/pretrain_{self.llm_config.dim}{moe_path}.pth'
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             state_dict = self.model.module.state_dict()
