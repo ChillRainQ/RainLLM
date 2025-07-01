@@ -7,9 +7,7 @@ from abc import ABC
 from contextlib import nullcontext
 
 import torch.cuda
-import torch.distributed as dist
 from torch import optim, nn
-from torch.distributed.tensor.parallel import ddp
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
@@ -48,7 +46,7 @@ class Trainer(ABC):
         else:
             self.wandb = None
 
-    def train(self, tokenizer_path):
+    def train_start(self, tokenizer_path):
         self.tokenizer, self.model = self.init_model(lm_config=self.llm_config, tokenizer_path=tokenizer_path)
         train_dataset = PretrainDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
         train_loader = DataLoader(
@@ -66,6 +64,19 @@ class Trainer(ABC):
         ctx = nullcontext() if self.device == "cpu" else torch.cuda.amp.autocast()
         for epoch in range(self.arg.epochs):
             self.train_epoch(train_loader, epoch, iter_per_epoch, ctx)
+        self.model.eval()
+        self.save()
+
+
+    def save(self):
+        moe_path = '_moe' if self.llm_config.use_moe else ''
+        ckp = f'{self.arg.out_dir}/pretrain_{self.llm_config.dim}{moe_path}.pth'
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            state_dict = self.model.module.state_dict()
+        else:
+            state_dict = self.model.state_dict()
+        state_dict = {k: v.half() for k, v in state_dict.items()}
+        torch.save(state_dict, ckp)
 
     def Logger(self, content):
         print(content)
@@ -135,28 +146,19 @@ class PretrainTrainer(Trainer):
                         self.optimizer.param_groups[-1]['lr'],
                         spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
 
-                if (self.wandb is not None) and (not ddp):
+                if self.wandb is not None:
                     self.wandb.log({"loss": loss.item() * self.arg.accumulation_steps,
                                     "lr": self.optimizer.param_groups[-1]['lr'],
                                     "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
 
-            if (step + 1) % self.arg.save_interval == 0 and (not ddp):
+            if (step + 1) % self.arg.save_interval == 0:
                 self.model.eval()
-                moe_path = '_moe' if self.llm_config.use_moe else ''
-                ckp = f'{self.arg.save_dir}/pretrain_{self.llm_config.hidden_size}{moe_path}.pth'
-
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    state_dict = self.model.module.state_dict()
-                else:
-                    state_dict = self.model.state_dict()
-
-                state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
-                self.wandb.log({f'now save at {ckp}'})
-                torch.save(state_dict, ckp)
+                self.save()
                 self.model.train()
 
 
 class SFTTrainer(Trainer):
+
     pass
 
 

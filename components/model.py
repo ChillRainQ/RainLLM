@@ -41,9 +41,12 @@ class TransformerBlock(nn.Module):
         self.attention_norm = NormFactory.norm(config, config.norm_type)
         self.ffn = FeedForwardFactory.ffn(config, config.ffn_type)
 
+        self.alpha = nn.Parameter(torch.tensor(1.0))
+        self.beta = nn.Parameter(torch.tensor(1.0))
+
     def forward(self, hidden_states, pos_cis, kv_cache=None, use_cache=False, attention_mask=None):
         # vector_attn_norm = self.attention_norm(vector)
-        input = hidden_states
+        res = hidden_states
         hidden_states, past_kv = self.attention(
             self.input_norm(hidden_states),
             pos_cis,
@@ -52,8 +55,8 @@ class TransformerBlock(nn.Module):
             attention_mask=attention_mask
         )
         # 残差链接
-        res_add = hidden_states + input
-        out = res_add + self.ffn(self.attention_norm(res_add))
+        res_add = self.alpha * hidden_states + res
+        out = res_add + self.beta * self.ffn(self.attention_norm(res_add))
         return out, past_kv
 
 
