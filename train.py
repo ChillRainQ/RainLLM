@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_wandb", action="store_true", default=True)
     parser.add_argument("--wandb_project", type=str, default="Rain Trainer")
     parser.add_argument("--num_workers", type=int, default=1)
-    parser.add_argument("--ddp", action="store_true")
+    parser.add_argument("--ddp", action="store_true", default=False)
     parser.add_argument("--accumulation_steps", type=int, default=8)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_iters", type=int, default=0)

@@ -140,75 +140,75 @@ class RainForCausalLM(PreTrainedModel, GenerationMixin):
         self.OUT.__setitem__('past_key_values', past_kvs)
         return self.OUT
 
-    @torch.inference_mode()
-    def generate(self,
-                 input_ids: torch.Tensor,
-                 eos_token_id: int = 2,
-                 pad_token_id: int = 0,
-                 max_new_tokens: int = 1024,
-                 temperature: float = 0.75,
-                 top_p: float = 0.90,
-                 stream: bool = False,
-                 rp=1.,
-                 use_kv_cache: bool = True,
-                 **args) -> Generator | torch.Tensor:
-        if stream:
-            return self._stream(input_ids, eos_token_id, max_new_tokens, temperature, top_p, rp, use_kv_cache, **args)
-        generated = []
-        # 在训练时 input_ids.size(0)不为1，这里是批量处理。
-        for i in range(input_ids.size(0)):
-            # 去除 pad_token_id
-            one_no_pad_token_ids = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(0)
-            out = self._stream(one_no_pad_token_ids, eos_token_id, max_new_tokens,
-                               temperature, top_p, rp, use_kv_cache, **args)
-            # 获取最新的生成
-            tokens_list = [tokens[:, -1:] for tokens in out]
-            # 拼接所有生成
-            generated_tokens = torch.cat(tokens_list, dim=-1) if tokens_list else one_no_pad_token_ids
-            # 前后拼接
-            full_seq = torch.cat([one_no_pad_token_ids, generated_tokens], dim=-1)
-            generated.append(full_seq)
-        # 获取最长，并补pad
-        max_len = max(seq.size(1) for seq in generated)
-        generated = [
-            torch.cat(
-                [seq, torch.full((1, max_len - seq.size(1)), pad_token_id, dtype=seq.dtype, device=seq.device)], dim=-1)
-            for seq in generated
-        ]
-        return torch.cat(generated, dim=0)
-
-    def _stream(self,
-                input_ids: torch.Tensor,
-                eos_token_id: int,
-                max_new_tokens: int,
-                temperature: float,
-                top_p: float,
-                rp: float,
-                use_cache: bool,
-                **args) -> Generator:
-        # 初始化
-        start, first, past_kv = input_ids.shape[1], True, None
-        # 通过网络后对概率分布进行处理和采样，最后在通过softmax得到token
-        while input_ids.shape[1] < max_new_tokens - 1:
-            if first or not use_cache:
-                out = self(input_token_ids=input_ids, kv_cache=past_kv, use_cache=use_cache, **args)
-            else:
-                out = self(input_token_ids=input_ids[:, -1:], kv_cache=past_kv, use_cache=use_cache,
-                           start_pos=input_ids.shape[1] - 1, **args)
-            logits, past_kvs = out.logits[:, -1, :], out.past_key_values
-            logits[:, list(set(input_ids.tolist()[0]))] /= rp
-            logits /= (temperature + 1e-9)
-            if top_p is not None and top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-                sorted_probs = F.softmax(sorted_logits, dim=-1)
-                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-                sorted_indices_to_remove[:, 0] = False
-                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                logits[indices_to_remove] = -float('Inf')
-            input_ids_next = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
-            input_ids = torch.cat((input_ids, input_ids_next), dim=1)
-            yield input_ids[:, start:]
-            if input_ids_next.item() == eos_token_id:
-                break
+    # @torch.inference_mode()
+    # def generate(self,
+    #              input_ids: torch.Tensor,
+    #              eos_token_id: int = 2,
+    #              pad_token_id: int = 0,
+    #              max_new_tokens: int = 1024,
+    #              temperature: float = 0.75,
+    #              top_p: float = 0.90,
+    #              stream: bool = False,
+    #              rp=1.,
+    #              use_kv_cache: bool = True,
+    #              **args) -> Generator | torch.Tensor:
+    #     if stream:
+    #         return self._stream(input_ids, eos_token_id, max_new_tokens, temperature, top_p, rp, use_kv_cache, **args)
+    #     generated = []
+    #     # 在训练时 input_ids.size(0)不为1，这里是批量处理。
+    #     for i in range(input_ids.size(0)):
+    #         # 去除 pad_token_id
+    #         one_no_pad_token_ids = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(0)
+    #         out = self._stream(one_no_pad_token_ids, eos_token_id, max_new_tokens,
+    #                            temperature, top_p, rp, use_kv_cache, **args)
+    #         # 获取最新的生成
+    #         tokens_list = [tokens[:, -1:] for tokens in out]
+    #         # 拼接所有生成
+    #         generated_tokens = torch.cat(tokens_list, dim=-1) if tokens_list else one_no_pad_token_ids
+    #         # 前后拼接
+    #         full_seq = torch.cat([one_no_pad_token_ids, generated_tokens], dim=-1)
+    #         generated.append(full_seq)
+    #     # 获取最长，并补pad
+    #     max_len = max(seq.size(1) for seq in generated)
+    #     generated = [
+    #         torch.cat(
+    #             [seq, torch.full((1, max_len - seq.size(1)), pad_token_id, dtype=seq.dtype, device=seq.device)], dim=-1)
+    #         for seq in generated
+    #     ]
+    #     return torch.cat(generated, dim=0)
+    #
+    # def _stream(self,
+    #             input_ids: torch.Tensor,
+    #             eos_token_id: int,
+    #             max_new_tokens: int,
+    #             temperature: float,
+    #             top_p: float,
+    #             rp: float,
+    #             use_cache: bool,
+    #             **args) -> Generator:
+    #     # 初始化
+    #     start, first, past_kv = input_ids.shape[1], True, None
+    #     # 通过网络后对概率分布进行处理和采样，最后在通过softmax得到token
+    #     while input_ids.shape[1] < max_new_tokens - 1:
+    #         if first or not use_cache:
+    #             out = self(input_token_ids=input_ids, kv_cache=past_kv, use_cache=use_cache, **args)
+    #         else:
+    #             out = self(input_token_ids=input_ids[:, -1:], kv_cache=past_kv, use_cache=use_cache,
+    #                        start_pos=input_ids.shape[1] - 1, **args)
+    #         logits, past_kvs = out.logits[:, -1, :], out.past_key_values
+    #         logits[:, list(set(input_ids.tolist()[0]))] /= rp
+    #         logits /= (temperature + 1e-9)
+    #         if top_p is not None and top_p < 1.0:
+    #             sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    #             sorted_probs = F.softmax(sorted_logits, dim=-1)
+    #             cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    #             sorted_indices_to_remove = cumulative_probs > top_p
+    #             sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+    #             sorted_indices_to_remove[:, 0] = False
+    #             indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    #             logits[indices_to_remove] = -float('Inf')
+    #         input_ids_next = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+    #         input_ids = torch.cat((input_ids, input_ids_next), dim=1)
+    #         yield input_ids[:, start:]
+    #         if input_ids_next.item() == eos_token_id:
+    #             break
