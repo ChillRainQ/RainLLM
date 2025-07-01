@@ -24,11 +24,11 @@ def init_model(args):
             use_moe=args.use_moe
         ))
 
-        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\pretrain\pretrain_512.pth', map_location=args.device), strict=True)
+        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\pretrain\pretrain_256.pth', map_location=args.device), strict=True)
 
-        if args.lora_name != 'None':
-            apply_lora(model)
-            load_lora(model, f'./{args.out_dir}/lora/{args.lora_name}_{args.hidden_size}.pth')
+        # if args.lora_name != 'None':
+        #     apply_lora(model)
+        #     load_lora(model, f'./{args.out_dir}/lora/{args.lora_name}_{args.hidden_size}.pth')
     else:
         transformers_model_path = 'D:\PythonCode\RainLLM\out\pretrain'
         tokenizer = AutoTokenizer.from_pretrained('D:\\PythonCode\\RainLLM\\models\\tokenizer')
@@ -109,9 +109,9 @@ def main():
     # MiniMind2-moe (145M)：(hidden_size=640, num_hidden_layers=8, use_moe=True)
     # MiniMind2-Small (26M)：(hidden_size=512, num_hidden_layers=8)
     # MiniMind2 (104M)：(hidden_size=768, num_hidden_layers=16)
-    parser.add_argument('--hidden_size', default=512, type=int)
-    parser.add_argument('--num_hidden_layers', default=16, type=int)
-    parser.add_argument('--max_seq_len', default=8192, type=int)
+    parser.add_argument('--hidden_size', default=256, type=int)
+    parser.add_argument('--num_hidden_layers', default=1, type=int)
+    parser.add_argument('--max_seq_len', default=512, type=int)
     parser.add_argument('--use_moe', default=False, type=bool)
     # 携带历史对话上下文条数
     # history_cnt需要设为偶数，即【用户问题, 模型回答】为1组；设置为0时，即当前query不携带历史上文

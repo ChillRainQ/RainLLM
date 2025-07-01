@@ -117,7 +117,7 @@ class FlashAttention(Attention):
     def forward(self,
                 x: torch.Tensor,
                 pos_cis: Tuple[torch.Tensor, torch.Tensor],
-                kv_cache: Tuple[torch.Tensor, torch.Tensor] | None = None,
+                past_key_value: Tuple[torch.Tensor, torch.Tensor] | None = None,
                 use_cache=False,
                 attention_mask: torch.Tensor | None = None):
         batch_size, seq_len, dim = x.shape
@@ -128,9 +128,9 @@ class FlashAttention(Attention):
         cos, sin = pos_cis
         q, k = Attention.apply_rotary_emb(q, k, cos[:seq_len], sin[:seq_len])
 
-        if kv_cache is not None:
-            k = torch.cat([kv_cache[0], k], dim=1)
-            v = torch.cat([kv_cache[1], v], dim=1)
+        if past_key_value is not None:
+            k = torch.cat([past_key_value[0], k], dim=1)
+            v = torch.cat([past_key_value[1], v], dim=1)
         past_kv = (k, v) if use_cache else None
 
         q, k, v = (
@@ -157,7 +157,7 @@ class FlashAttention(Attention):
                 extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
                 scores = scores + extended_attention_mask
             scores = F.softmax(scores.float(), dim=-1).type_as(q)
-            scores = self.attn_dropout(scores)
+            scores = self.attention_drop(scores)
             output = scores @ v
         output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
         output = self.resid_drop(self.wo(output))

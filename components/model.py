@@ -29,35 +29,64 @@ class TransformerBlock(nn.Module):
     解码器块
     """
 
-    def __init__(self, id: int, config: RainLLMConfig):
+    def __init__(self, id: int, config: RainLLMConfig, runtime_auto_eval_cut: bool = False):
         super().__init__()
         self.n_heads = config.n_heads
+        self.prune_threshold = config.prune_threshold
         self.dim = config.dim
+        self.save_memory = config.save_memory
         self.head_dim = config.dim // self.n_heads
         self.attention = AttentionFactory.attention(config, config.attention_type)
 
         self.layer_id = id
-        self.input_norm = NormFactory.norm(config, config.norm_type)
-        self.attention_norm = NormFactory.norm(config, config.norm_type)
+        self.pre_attn_norm = NormFactory.norm(config, config.norm_type)
+        self.pre_ffn_norm = NormFactory.norm(config, config.norm_type)
         self.ffn = FeedForwardFactory.ffn(config, config.ffn_type)
 
-        self.alpha = nn.Parameter(torch.tensor(1.0))
-        self.beta = nn.Parameter(torch.tensor(1.0))
+        self.alpha = nn.Parameter(torch.ones(1))
+        self.beta = nn.Parameter(torch.ones(1))
+        self._attention_active = True
+        self._ffn_active = True
+        self.useless = False
+        self.first_run = True
+        self.runtime_auto_eval_cut_first_run = runtime_auto_eval_cut if not self.training else False
 
-    def forward(self, hidden_states, pos_cis, kv_cache=None, use_cache=False, attention_mask=None):
-        # vector_attn_norm = self.attention_norm(vector)
+    #
+    def _update_pruning_state(self) -> None:
+        """更新剪枝状态，避免在forward中重复计算"""
+        with torch.no_grad():
+            self._attention_active = torch.abs(self.alpha).item() > self.prune_threshold
+            self._ffn_active = torch.abs(self.beta).item() > self.prune_threshold
+            if not self._ffn_active and not self._attention_active:
+                self.useless = True
+
+    def forward(self, hidden_states, pos_cis, past_key_value=None, use_cache=False, attention_mask=None):
+        if self.runtime_auto_eval_cut_first_run:
+            self._update_pruning_state()
+            self.runtime_auto_eval_cut_first_run = False
         res = hidden_states
-        hidden_states, past_kv = self.attention(
-            self.input_norm(hidden_states),
-            pos_cis,
-            kv_cache=kv_cache,
-            use_cache=use_cache,
-            attention_mask=attention_mask
-        )
+        if self.useless:
+            if self.save_memory:
+                del self.ffn, self.attention
+            return res, past_key_value
+        if self._attention_active:
+            hidden_states, present_key_value = self.attention(
+                self.pre_attn_norm(hidden_states),
+                pos_cis,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                attention_mask=attention_mask
+            )
+            res_add = torch.abs(self.alpha) * hidden_states + res
+        else:
+            present_key_value = past_key_value
+            res_add = res
+        if self._ffn_active:
+            out = res_add + torch.abs(self.beta) * self.ffn(self.pre_ffn_norm(res_add))
+        else:
+            out = res_add
         # 残差链接
-        res_add = self.alpha * hidden_states + res
-        out = res_add + self.beta * self.ffn(self.attention_norm(res_add))
-        return out, past_kv
+        return out, present_key_value
 
 
 class RainModule(nn.Module):
@@ -67,7 +96,7 @@ class RainModule(nn.Module):
         self.embeddings = nn.Embedding(self.config.vocab_size, self.config.dim)
         self.dropout = nn.Dropout(self.config.dropout)
         self.transformer_blocks = nn.ModuleList(
-            [TransformerBlock(i, self.config) for i in range(self.config.n_layers)]
+            [TransformerBlock(i, self.config, False) for i in range(self.config.n_layers)]
         )
         self.norm = NormFactory.norm(self.config, self.config.norm_type)
         cos, sin = rotate(dim=self.config.dim // self.config.n_heads,
@@ -76,17 +105,16 @@ class RainModule(nn.Module):
         self.register_buffer("freqs_cos", cos, persistent=False)
         self.register_buffer("freqs_sin", sin, persistent=False)
 
-
     def forward(self,
                 input_token_ids: torch.Tensor = None,
                 attention_mask: torch.Tensor | None = None,
-                kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
+                past_key_values: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
                 use_cache: bool = False,
                 **args):
         # 检查 kv_cache 并初始化
         _, seq_len = input_token_ids.shape
-        kv_cache = kv_cache or [None] * len(self.transformer_blocks)
-        start_pos = kv_cache[0][0].shape[1] if kv_cache[0] is not None else 0
+        past_key_values = past_key_values or [None] * len(self.transformer_blocks)
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         # 词嵌入
         hidden_states = self.dropout(self.embeddings(input_token_ids))
         # 旋转位置编码计算
@@ -96,11 +124,11 @@ class RainModule(nn.Module):
         )
         # 传播每一个Transformer块
         presents = []
-        for layer_ids, (layer, past_key_value) in enumerate(zip(self.transformer_blocks, kv_cache)):
+        for layer_ids, (layer, past_key_value) in enumerate(zip(self.transformer_blocks, past_key_values)):
             hidden_states, present = layer(
                 hidden_states,
                 position_embeddings,
-                kv_cache=past_key_value,
+                past_key_value=past_key_value,
                 use_cache=use_cache,
                 attention_mask=attention_mask)
             presents.append(present)
