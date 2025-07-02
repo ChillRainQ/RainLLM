@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 
 
 def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained('D:\\PythonCode\\RainLLM\\models\\tokenizer')
+    tokenizer = AutoTokenizer.from_pretrained('D:\\PythonCode\\RainLLM\\models\\new_tokenizer')
     if args.load == 0:
         moe_path = '_moe' if args.use_moe else ''
         modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason', 4: 'grpo'}
@@ -31,7 +31,7 @@ def init_model(args):
         #     load_lora(model, f'./{args.out_dir}/lora/{args.lora_name}_{args.hidden_size}.pth')
     else:
         transformers_model_path = 'D:\PythonCode\RainLLM\out\pretrain'
-        tokenizer = AutoTokenizer.from_pretrained('D:\\PythonCode\\RainLLM\\models\\tokenizer')
+        tokenizer = AutoTokenizer.from_pretrained('D:\\PythonCode\\RainLLM\\models\\new_tokenizer')
         model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
     print(f'MiniMind模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
     return model.eval().to(args.device), tokenizer
@@ -102,8 +102,8 @@ def main():
     parser = argparse.ArgumentParser(description="Chat with MiniMind")
     parser.add_argument('--lora_name', default='None', type=str)
     parser.add_argument('--out_dir', default='out', type=str)
-    parser.add_argument('--temperature', default=0.85, type=float)
-    parser.add_argument('--top_p', default=0.85, type=float)
+    parser.add_argument('--temperature', default=0.7, type=float)
+    parser.add_argument('--top_p', default=0.8, type=float)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str)
     # 此处max_seq_len（最大输出长度）并不意味模型具有对应的长文本的性能，仅防止QA出现被截断的问题
     # MiniMind2-moe (145M)：(hidden_size=640, num_hidden_layers=8, use_moe=True)
@@ -118,7 +118,7 @@ def main():
     # 模型未经过外推微调时，在更长的上下文的chat_template时难免出现性能的明显退化，因此需要注意此处设置
     parser.add_argument('--history_cnt', default=0, type=int)
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=1, type=int,
+    parser.add_argument('--model_mode', default=0, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
     args = parser.parse_args()
 
