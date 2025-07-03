@@ -45,31 +45,26 @@ class TransformerBlock(nn.Module):
 
         self.alpha = nn.Parameter(torch.ones(1))
         self.beta = nn.Parameter(torch.ones(1))
-        # self._attention_active = True
-        # self._ffn_active = True
-        # self.useless = False
-        # self.first_run = True
-        # self.runtime_auto_eval_cut_first_run = runtime_auto_eval_cut if not self.training else False
 
-    #
-    # def _update_pruning_state(self) -> None:
-    #     """更新剪枝状态，避免在forward中重复计算"""
-    #     with torch.no_grad():
-    #         self._attention_active = torch.abs(self.alpha).item() > self.prune_threshold
-    #         self._ffn_active = torch.abs(self.beta).item() > self.prune_threshold
-    #         if not self._ffn_active and not self._attention_active:
-    #             self.useless = True
+        self._attention_active = torch.abs(self.alpha).item() < self.prune_threshold
+        self._ffn_active = torch.abs(self.beta).item() < self.prune_threshold
+        self.useless = False
+        self.first_run = True
+        self.runtime_auto_eval_cut_first_run = runtime_auto_eval_cut if not self.training else False
+
+    def _update_pruning_state(self) -> None:
+        # return
+        """更新剪枝状态，避免在forward中重复计算"""
+        with torch.no_grad():
+            self._attention_active = torch.abs(self.alpha).item() < self.prune_threshold
+            self._ffn_active = torch.abs(self.beta).item() < self.prune_threshold
+            if not self._ffn_active and not self._attention_active:
+                self.useless = True
+
 
     def forward(self, hidden_states, pos_cis, past_key_value=None, use_cache=False, attention_mask=None):
-        # if self.runtime_auto_eval_cut_first_run:
-        #     self._update_pruning_state()
-        #     self.runtime_auto_eval_cut_first_run = False
+
         res = hidden_states
-        # if self.useless:
-        #     if self.save_memory:
-        #         del self.ffn, self.attention
-        #     return res, past_key_value
-        # if self._attention_active:
         hidden_states, present_key_value = self.attention(
             self.pre_attn_norm(hidden_states),
             pos_cis,
@@ -78,12 +73,31 @@ class TransformerBlock(nn.Module):
             attention_mask=attention_mask
         )
         res_add = hidden_states + self.alpha * res
+        # 残差链接
+        out = self.beta * res_add + self.ffn(self.pre_ffn_norm(res_add))
+        # if self.runtime_auto_eval_cut_first_run:
+        #     self._update_pruning_state()
+        #     self.runtime_auto_eval_cut_first_run = False
+        #
+        # res = hidden_states
+        # if self.useless:
+        #     if self.save_memory:
+        #         del self.ffn, self.attention
+        #     return res, past_key_value
+        # if torch.abs(self.alpha).item() < self.prune_threshold:
+        #     hidden_states, present_key_value = self.attention(
+        #         self.pre_attn_norm(hidden_states),
+        #         pos_cis,
+        #         past_key_value=past_key_value,
+        #         use_cache=use_cache,
+        #         attention_mask=attention_mask
+        #     )
+        #     res_add = 1 * hidden_states + self.alpha * res
         # else:
         #     present_key_value = past_key_value
         #     res_add = res
-        # if self._ffn_active:
-        # 残差链接
-        out = self.beta * res_add + self.ffn(self.pre_ffn_norm(res_add))
+        # if torch.abs(self.beta).item() < self.prune_threshold:
+        #     out = self.beta * res_add  + 1 * self.ffn(self.pre_ffn_norm(res_add))
         # else:
         #     out = res_add
         return out, present_key_value

@@ -728,8 +728,8 @@ class TokenizerEvaluator:
 if __name__ == "__main__":
     # 使用示例
     evaluator = TokenizerEvaluator(
-        tokenizer_path="D:\\PythonCode\\RainLLM\\tokenizer\\model",
-        new_data_path="D:\PythonCode\RainLLM\dataset\pretrain_combined_shuffled_512.jsonl",
+        tokenizer_path="D:\\PythonCode\\RainLLM\\models\\new_tokenizer",
+        new_data_path="D:\PythonCode\RainLLM\dataset\sft_512.jsonl",
         sample_size=500000,  # 50万字符样本
         shuffle_sample_size=10000  # 1万行打乱验证
     )

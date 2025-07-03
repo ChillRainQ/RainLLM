@@ -6,7 +6,7 @@ from components.trainer import TrainerFactory
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Rain Trainer")
-    parser.add_argument("--out_dir", type=str, default=constant.PRETRAIN_DIR)
+    parser.add_argument("--out_dir", type=str, default=constant.SFTTRAIN_DIR)
     # 若要以最快速度实现zero则epochs设置为1轮；否则应当利用有限的数据训练2~6个epochs。
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -24,10 +24,10 @@ if __name__ == '__main__':
     parser.add_argument("--save_interval", type=int, default=100)
     parser.add_argument('--local_rank', type=int, default=-1)
     parser.add_argument('--dim', default=512, type=int)
-    parser.add_argument('--n_layers', default=16, type=int)
+    parser.add_argument('--n_layers', default=10, type=int)
     parser.add_argument('--max_seq_len', default=512, type=int)
     parser.add_argument('--use_moe', default=False, type=bool)
-    parser.add_argument("--data_path", type=str, default=constant.PRETRAIN_DATA_PATH)
+    parser.add_argument("--data_path", type=str, default=constant.SFT_DATA_PATH)
     parser.add_argument("--key", type=str, default="0")
     args = parser.parse_args()
     trainer = TrainerFactory.trainer(args.key, args)

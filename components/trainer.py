@@ -11,7 +11,7 @@ from torch import optim, nn
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
-from components.dataset import PretrainDataset
+from components.dataset import PretrainDataset, SFTDataset, StreamingSFTDataset
 from components.model import RainForCausalLM
 from components.model_config import RainLLMConfig
 
@@ -22,6 +22,7 @@ class Trainer(ABC):
     model: RainForCausalLM | None
     tokenizer: PreTrainedTokenizerFast | None
     train_config: dict
+    name: str
 
     def __init__(self, arg: argparse.Namespace):
         print(f'Trainer init....')
@@ -48,9 +49,9 @@ class Trainer(ABC):
 
     def train_start(self, tokenizer_path):
         self.tokenizer, self.model = self.init_model(lm_config=self.llm_config, tokenizer_path=tokenizer_path)
-        train_dataset = PretrainDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
+        dataset = self.get_dataset()
         train_loader = DataLoader(
-            train_dataset,
+            dataset,
             batch_size=self.arg.batch_size,
             pin_memory=True,
             drop_last=False,
@@ -66,13 +67,33 @@ class Trainer(ABC):
             self.train_epoch(train_loader, epoch, iter_per_epoch, ctx)
         self.model.eval()
         self.save()
-
+    # def train_start(self, tokenizer_path):
+    #     self.tokenizer, self.model = self.init_model(lm_config=self.llm_config, tokenizer_path=tokenizer_path)
+    #     dataset = self.get_dataset()
+    #
+    #     train_loader = DataLoader(
+    #         dataset,
+    #         batch_size=self.arg.batch_size,
+    #         pin_memory=True,
+    #         drop_last=False,
+    #         shuffle=False,  # IterableDataset 不支持 shuffle
+    #         num_workers=self.arg.num_workers,
+    #     )
+    #
+    #     self.scaler = torch.cuda.amp.GradScaler(enabled=(self.arg.dtype in ['float16', 'bfloat16']))
+    #     self.optimizer = optim.AdamW(self.model.parameters(), lr=self.arg.learning_rate)
+    #     ctx = nullcontext() if self.device == "cpu" else torch.cuda.amp.autocast()
+    #
+    #     for epoch in range(self.arg.epochs):
+    #         self.train_epoch(train_loader, epoch, None, ctx)  # ❗️去掉 iter_per_epoch
+    #     self.model.eval()
+    #     self.save()
 
     def save(self):
         moe_path = '_moe' if self.llm_config.use_moe else ''
         if not os.path.isdir(self.arg.out_dir):
             os.mkdir(self.arg.out_dir)
-        ckp = f'{self.arg.out_dir}/pretrain_{self.llm_config.dim}{moe_path}.pth'
+        ckp = f'{self.arg.out_dir}/{self.name}_{self.llm_config.dim}_{self.llm_config.n_layers}{moe_path}.pth'
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             state_dict = self.model.module.state_dict()
         else:
@@ -100,8 +121,15 @@ class Trainer(ABC):
     def train_epoch(self, train_loader, epoch, iter_per_epoch, ctx):
         raise ValueError
 
+    @abc.abstractmethod
+    def get_dataset(self):
+        raise ValueError
+
 
 class PretrainTrainer(Trainer):
+    name = "pretrain"
+    def get_dataset(self):
+        return PretrainDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
 
     def train_epoch(self, train_loader, epoch, iter_per_epoch, ctx):
         loss_fct = nn.CrossEntropyLoss(reduction='none')
@@ -160,8 +188,142 @@ class PretrainTrainer(Trainer):
 
 
 class SFTTrainer(Trainer):
+    name = "full_sft"
+    def get_dataset(self):
+        return SFTDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
+    def train_epoch(self, train_loader, epoch, iter_per_epoch, ctx):
+        loss_fct = nn.CrossEntropyLoss(reduction='none')
+        start_time = time.time()
+        for step, (X, Y, loss_mask) in enumerate(train_loader):
+            X = X.to(self.arg.device)
+            Y = Y.to(self.arg.device)
+            loss_mask = loss_mask.to(self.arg.device)
+            lr = self.get_lr(epoch * iter_per_epoch + step, self.arg.epochs * iter_per_epoch, self.arg.learning_rate)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
 
-    pass
+            with ctx:
+                res = self.model(X)
+                loss = loss_fct(
+                    res.logits.view(-1, res.logits.size(-1)),
+                    Y.view(-1)
+                ).view(Y.size())
+
+                loss = (loss * loss_mask).sum() / loss_mask.sum()
+                loss += res.aux_loss
+                loss = loss / self.arg.accumulation_steps
+
+            self.scaler.scale(loss).backward()
+
+            if (step + 1) % self.arg.accumulation_steps == 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.arg.grad_clip)
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+                self.optimizer.zero_grad(set_to_none=True)
+
+            if step % self.arg.log_interval == 0:
+                spend_time = time.time() - start_time
+                self.Logger(
+                    'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+                        epoch + 1,
+                        self.arg.epochs,
+                        step,
+                        iter_per_epoch,
+                        loss.item() * self.arg.accumulation_steps,
+                        self.optimizer.param_groups[-1]['lr'],
+                        spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
+
+                if self.wandb is not None:
+                    self.wandb.log({"loss": loss * self.arg.accumulation_steps,
+                                    "lr": self.optimizer.param_groups[-1]['lr'],
+                                    "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
+
+            if (step + 1) % self.arg.save_interval == 0:
+                self.model.eval()
+                moe_path = '_moe' if self.llm_config.use_moe else ''
+                ckp = f'{self.arg.save_dir}/full_sft_{self.llm_config.hidden_size}_{self.llm_config.n_layers}{moe_path}.pth'
+                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+                    state_dict = self.model.module.state_dict()
+                else:
+                    state_dict = self.model.state_dict()
+                state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
+                torch.save(state_dict, ckp)
+                self.model.train()
+    # def train_epoch(self, train_loader, i, epoch, ctx):
+    #     loss_fct = nn.CrossEntropyLoss(reduction='none')
+    #     start_time = time.time()
+    #     total_steps = 1000  # 🟡可配置最大步数（防止无限训练）
+    #
+    #     for step, (X, Y, loss_mask) in enumerate(train_loader):
+    #         if step >= total_steps:
+    #             break
+    #
+    #         X = X.to(self.arg.device)
+    #         Y = Y.to(self.arg.device)
+    #         loss_mask = loss_mask.to(self.arg.device)
+    #
+    #         global_step = 1 * total_steps + step  # 用 total_steps 替代 iter_per_epoch
+    #         total_train_steps = self.arg.epochs * total_steps
+    #         lr = self.get_lr(global_step, total_train_steps, self.arg.learning_rate)
+    #         for param_group in self.optimizer.param_groups:
+    #             param_group['lr'] = lr
+    #
+    #         with ctx:
+    #             res = self.model(X)
+    #             loss = loss_fct(
+    #                 res.logits.view(-1, res.logits.size(-1)),
+    #                 Y.view(-1)
+    #             ).view(Y.size())
+    #
+    #             loss = (loss * loss_mask).sum() / loss_mask.sum()
+    #             loss += res.aux_loss
+    #             loss = loss / self.arg.accumulation_steps
+    #
+    #         self.scaler.scale(loss).backward()
+    #
+    #         if (step + 1) % self.arg.accumulation_steps == 0:
+    #             self.scaler.unscale_(self.optimizer)
+    #             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.arg.grad_clip)
+    #
+    #             self.scaler.step(self.optimizer)
+    #             self.scaler.update()
+    #             self.optimizer.zero_grad(set_to_none=True)
+    #
+    #         if step % self.arg.log_interval == 0:
+    #             spend_time = time.time() - start_time
+    #             est_total = spend_time / (step + 1) * total_steps
+    #             eta = est_total - spend_time
+    #             self.Logger(
+    #                 'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} ETA:{}min'.format(
+    #                      1,
+    #                     self.arg.epochs,
+    #                     step,
+    #                     total_steps,
+    #                     loss.item() * self.arg.accumulation_steps,
+    #                     self.optimizer.param_groups[-1]['lr'],
+    #                     int(eta) // 60
+    #                 )
+    #             )
+    #
+    #             if self.wandb is not None:
+    #                 self.wandb.log({
+    #                     "loss": loss * self.arg.accumulation_steps,
+    #                     "lr": self.optimizer.param_groups[-1]['lr'],
+    #                     "epoch_time(min)": int(eta) // 60
+    #                 })
+    #
+    #         if (step + 1) % self.arg.save_interval == 0:
+    #             self.model.eval()
+    #             moe_path = '_moe' if self.llm_config.use_moe else ''
+    #             ckp = f'{self.arg.out_dir}/full_sft_{self.llm_config.hidden_size}_{self.llm_config.n_layers}{moe_path}.pth'
+    #             state_dict = self.model.module.state_dict() if isinstance(self.model,
+    #                                                                       torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
+    #             state_dict = {k: v.half() for k, v in state_dict.items()}
+    #             torch.save(state_dict, ckp)
+    #             self.model.train()
 
 
 class RLTrainer(Trainer):

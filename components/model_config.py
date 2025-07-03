@@ -26,7 +26,7 @@ class RainLLMConfig(PretrainedConfig):
                  n_heads: int = 8, n_kv_heads: int = 2, attention_type: str = "flash", norm_type: str = "rms",
                  ffn_type: str = "default", norm_eps: float = 1e-05, dropout: float = 0.0, rope_base: float = 1e6,
                  hidden_dim: int = None, multiple_of: int = 64, use_moe: bool = False, ffn_act: str = 'silu',
-                 max_position_embs: int = 32768, prune_threshold: float = 0.05, save_memory: bool = True, **kwargs):
+                 max_position_embs: int = 32768, prune_threshold: float = 5, save_memory: bool = True, **kwargs):
         super().__init__(**kwargs)
         self.dim = dim
         self.max_seq_len = max_seq_len
