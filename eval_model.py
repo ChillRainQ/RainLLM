@@ -24,7 +24,7 @@ def init_model(args):
             use_moe=args.use_moe
         ))
 
-        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\pretrain\pretrain_512_10.pth', map_location=args.device), strict=True)
+        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\sft\\full_sft_512_10.pth', map_location=args.device), strict=True)
 
         # if args.lora_name != 'None':
         #     apply_lora(model)
@@ -118,7 +118,7 @@ def main():
     # 模型未经过外推微调时，在更长的上下文的chat_template时难免出现性能的明显退化，因此需要注意此处设置
     parser.add_argument('--history_cnt', default=0, type=int)
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=0, type=int,
+    parser.add_argument('--model_mode', default=1, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
     args = parser.parse_args()
 

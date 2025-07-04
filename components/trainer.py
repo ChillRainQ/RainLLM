@@ -11,6 +11,7 @@ from torch import optim, nn
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
+import constant
 from components.dataset import PretrainDataset, SFTDataset, StreamingSFTDataset
 from components.model import RainForCausalLM
 from components.model_config import RainLLMConfig
@@ -31,6 +32,8 @@ class Trainer(ABC):
         self.llm_config = RainLLMConfig(
             dim=arg.dim,
             n_layers=arg.n_layers,
+            ffn_type=arg.ffn
+
         )
         self.arg = arg
         self.device = arg.device
@@ -67,6 +70,7 @@ class Trainer(ABC):
             self.train_epoch(train_loader, epoch, iter_per_epoch, ctx)
         self.model.eval()
         self.save()
+
     # def train_start(self, tokenizer_path):
     #     self.tokenizer, self.model = self.init_model(lm_config=self.llm_config, tokenizer_path=tokenizer_path)
     #     dataset = self.get_dataset()
@@ -93,7 +97,8 @@ class Trainer(ABC):
         moe_path = '_moe' if self.llm_config.use_moe else ''
         if not os.path.isdir(self.arg.out_dir):
             os.mkdir(self.arg.out_dir)
-        ckp = f'{self.arg.out_dir}/{self.name}_{self.llm_config.dim}_{self.llm_config.n_layers}{moe_path}.pth'
+        ckp = f'{self.arg.out_dir}/{self.arg.out_model_name}'
+        # ckp = f'{self.arg.out_dir}/{self.name}_{self.llm_config.dim}_{self.llm_config.n_layers}{moe_path}.pth'
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             state_dict = self.model.module.state_dict()
         else:
@@ -128,8 +133,10 @@ class Trainer(ABC):
 
 class PretrainTrainer(Trainer):
     name = "pretrain"
+
     def get_dataset(self):
-        return PretrainDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
+        return PretrainDataset(os.path.join(self.arg.data_path, self.arg.data_name), self.tokenizer,
+                               max_length=self.arg.max_seq_len)
 
     def train_epoch(self, train_loader, epoch, iter_per_epoch, ctx):
         loss_fct = nn.CrossEntropyLoss(reduction='none')
@@ -189,8 +196,22 @@ class PretrainTrainer(Trainer):
 
 class SFTTrainer(Trainer):
     name = "full_sft"
+
     def get_dataset(self):
-        return SFTDataset(self.arg.data_path, self.tokenizer, max_length=self.arg.max_seq_len)
+        return SFTDataset(os.path.join(constant.DATASET_DIR, self.arg.data_name), self.tokenizer,
+                          max_length=self.arg.max_seq_len)
+
+    def init_model(self, lm_config, tokenizer_path):
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        model = RainForCausalLM(config=lm_config).to(self.device)
+        ckp = os.path.join(constant.INPUT_DIR, self.arg.input_model_name)
+        print(f"now use {ckp}")
+        model.load_state_dict(torch.load(ckp, map_location=self.arg.device), strict=False)
+        self.Logger(f'LLM可训练总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
+        model = model.to(self.arg.device)
+        return tokenizer, model
+
     def train_epoch(self, train_loader, epoch, iter_per_epoch, ctx):
         loss_fct = nn.CrossEntropyLoss(reduction='none')
         start_time = time.time()
@@ -243,14 +264,7 @@ class SFTTrainer(Trainer):
 
             if (step + 1) % self.arg.save_interval == 0:
                 self.model.eval()
-                moe_path = '_moe' if self.llm_config.use_moe else ''
-                ckp = f'{self.arg.save_dir}/full_sft_{self.llm_config.hidden_size}_{self.llm_config.n_layers}{moe_path}.pth'
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    state_dict = self.model.module.state_dict()
-                else:
-                    state_dict = self.model.state_dict()
-                state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
-                torch.save(state_dict, ckp)
+                self.save()
                 self.model.train()
     # def train_epoch(self, train_loader, i, epoch, ctx):
     #     loss_fct = nn.CrossEntropyLoss(reduction='none')
