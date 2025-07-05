@@ -24,7 +24,7 @@ def init_model(args):
             use_moe=args.use_moe
         ))
 
-        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\sft\\full_sft_512_10.pth', map_location=args.device), strict=True)
+        model.load_state_dict(torch.load('D:\PythonCode\RainLLM\out\sft\\rain_sft_512_10.pth', map_location=args.device), strict=True)
 
         # if args.lora_name != 'None':
         #     apply_lora(model)

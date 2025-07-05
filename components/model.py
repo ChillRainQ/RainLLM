@@ -1,4 +1,6 @@
 import json
+import math
+import time
 from typing import List, Tuple, Generator
 
 import torch
@@ -22,6 +24,28 @@ def rotate(dim: int, base: float, len: int = 32 * 1024):
     freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1)
     freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1)
     return freqs_cos, freqs_sin
+
+
+class FlowNet(nn.Module):
+    def __init__(self, config : RainLLMConfig, num_freq_bands=64, max_period=365*24*60*60):
+        super().__init__()
+        self.num_freq_bands = num_freq_bands
+        self.max_period = max_period
+        self.frequencies = 1.0 / (2.0 ** torch.linspace(
+            math.log2(max_period),
+            0.0,
+            num_freq_bands
+        ))
+        self.dim = config.dim
+        self.flow_layer = nn.Linear(2 * num_freq_bands, self.dim)
+
+    def forward(self, input):
+        timestamps = input.float()
+        angles = timestamps.unsqueeze(-1) * 2 * math.pi * self.frequencies
+        sin_enc = torch.sin(angles)
+        cos_enc = torch.cos(angles)
+        time_enc = torch.cat([sin_enc, cos_enc], dim=-1)
+        return self.flow_layer(time_enc)
 
 
 class TransformerBlock(nn.Module):
@@ -124,6 +148,7 @@ class RainModule(nn.Module):
                 attention_mask: torch.Tensor | None = None,
                 past_key_values: List[Tuple[torch.Tensor, torch.Tensor]] | None = None,
                 use_cache: bool = False,
+                flow: torch.Tensor | None = None,
                 **args):
         # 检查 kv_cache 并初始化
         _, seq_len = input_token_ids.shape
@@ -138,6 +163,8 @@ class RainModule(nn.Module):
         )
         # 传播每一个Transformer块
         presents = []
+        if flow is not None:
+            hidden_states += flow
         for layer_ids, (layer, past_key_value) in enumerate(zip(self.transformer_blocks, past_key_values)):
             hidden_states, present = layer(
                 hidden_states,
@@ -154,10 +181,16 @@ class RainForCausalLM(PreTrainedModel, GenerationMixin):
     def __init__(self, config: RainLLMConfig):
         self.config = config or RainLLMConfig()
         super().__init__(self.config)
+        if config.flow:
+            self.flow = FlowNet(self.config)
+        else:
+            self.flow = None
         self.model = RainModule(self.config)
         self.output = nn.Linear(self.config.dim, self.config.vocab_size, bias=False)
         self.model.embeddings.weight = self.output.weight
         self.OUT = CausalLMOutputWithPast()
+        self.flow_state = None
+        self.user_input = None
 
     def forward(self,
                 input_ids: torch.Tensor | None = None,
@@ -166,11 +199,13 @@ class RainForCausalLM(PreTrainedModel, GenerationMixin):
                 use_cache: bool = False,
                 logits_keep: int | torch.Tensor = 0,
                 **args):
+
         hidden_states, past_kvs = self.model(
             input_token_ids=input_ids,
             attention_mask=attention_mask,
             kv_cache=past_kvs,
             use_cache=use_cache,
+            flow=self.flow_state,
             **args
         )
         slice_indices = slice(-logits_keep, None) if isinstance(logits_keep, int) else logits_keep
@@ -180,6 +215,19 @@ class RainForCausalLM(PreTrainedModel, GenerationMixin):
         self.OUT.__setitem__('aux_loss', 0)
         self.OUT.__setitem__('past_key_values', past_kvs)
         return self.OUT
+
+    def input(self, x):
+        self.user_input = x
+
+    def tick(self):
+        if self.user_input is not None:
+            # todo 输入结合，把flow也放进去
+            res = self.forward()
+            self.user_input = None
+            return res
+        if self.flow is not None:
+            self.flow_state = self.flow(time.time())
+
 
     # @torch.inference_mode()
     # def generate(self,
